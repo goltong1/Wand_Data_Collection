@@ -10,19 +10,21 @@
       -webkit-tap-highlight-color: transparent;
     }
 
-    body {
+    html, body {
       margin: 0;
+      width: 100%;
+      min-height: 100%;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: #111;
       color: #fff;
-      overflow: hidden;
+      overflow-x: hidden;
+      overflow-y: auto;
     }
 
     #app {
       width: 100vw;
-      height: 100vh;
-      display: flex;
-      flex-direction: column;
+      min-height: 100dvh;
+      display: block;
     }
 
     header {
@@ -48,22 +50,20 @@
     }
 
     main {
-      flex: 1;
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
+      display: block;
+      overflow: visible;
+      padding-bottom: 24px;
     }
 
     .camera-wrap {
       position: relative;
-      flex: 1;
-      min-height: 0;
+      width: 100%;
+      height: 38dvh;
+      min-height: 180px;
+      max-height: 420px;
       background: #000;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      touch-action: none;
+      touch-action: manipulation;
+      overflow: hidden;
     }
 
     video,
@@ -119,20 +119,23 @@
     .controls {
       background: #181818;
       border-top: 1px solid #333;
-      padding: 10px;
+      border-bottom: 1px solid #333;
+      padding: 8px;
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 8px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
     }
 
     button {
       border: 0;
       border-radius: 12px;
-      padding: 12px 8px;
-      font-size: 14px;
+      padding: 10px 6px;
+      min-height: 42px;
+      font-size: 12px;
       font-weight: 700;
       color: #fff;
       background: #333;
+      white-space: normal;
     }
 
     button:active {
@@ -158,9 +161,9 @@
     .spell-panel {
       background: #111;
       border-top: 1px solid #333;
-      padding: 10px;
-      max-height: 34vh;
-      overflow-y: auto;
+      padding: 10px 10px 24px;
+      max-height: none;
+      overflow: visible;
     }
 
     .spell-panel h2 {
@@ -171,16 +174,23 @@
 
     .spell-grid {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
     }
 
     .spell-btn {
       padding: 10px 4px;
+      min-height: 40px;
       font-size: 11px;
       line-height: 1.15;
-      background: #2c2c2c;
+      background: #3a3a3a;
       word-break: break-word;
+    }
+
+    @media (min-width: 700px) {
+      .camera-wrap { height: 50dvh; }
+      .spell-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .controls { grid-template-columns: repeat(6, minmax(0, 1fr)); }
     }
 
     .spell-btn.selected {
@@ -219,6 +229,7 @@
 
       <div class="controls">
         <button id="cameraBtn">CAMERA</button>
+        <button id="switchCameraBtn">FRONT</button>
         <button class="primary" id="recBtn">REC</button>
         <button id="clearBtn">CLEAR</button>
         <button class="save" id="saveBtn" disabled>SAVE</button>
@@ -267,6 +278,7 @@
     const swatch = document.getElementById("swatch");
 
     const cameraBtn = document.getElementById("cameraBtn");
+    const switchCameraBtn = document.getElementById("switchCameraBtn");
     const recBtn = document.getElementById("recBtn");
     const clearBtn = document.getElementById("clearBtn");
     const saveBtn = document.getElementById("saveBtn");
@@ -274,6 +286,8 @@
     const spellGrid = document.getElementById("spellGrid");
 
     let selectedSpell = SPELLS[0];
+    let useFrontCamera = false;
+    let currentStream = null;
     let state = "idle";
     let waitStart = 0;
     let recordStart = 0;
@@ -633,6 +647,36 @@
       displayCtx.globalAlpha = 1.0;
     }
 
+    function stopCurrentCamera() {
+      if (!currentStream) return;
+      currentStream.getTracks().forEach((track) => track.stop());
+      currentStream = null;
+      video.srcObject = null;
+    }
+
+    function getCameraCandidates() {
+      const mode = useFrontCamera ? "user" : "environment";
+      return [
+        {
+          video: {
+            facingMode: { exact: mode },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        },
+        {
+          video: {
+            facingMode: mode,
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        },
+        { video: true, audio: false },
+      ];
+    }
+
     async function startCamera() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setStatus("이 브라우저는 카메라 API를 지원하지 않음");
@@ -646,35 +690,15 @@
         return;
       }
 
-      const candidates = [
-        {
-          video: {
-            facingMode: { exact: "environment" },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-          audio: false,
-        },
-        {
-          video: {
-            facingMode: "environment",
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-          audio: false,
-        },
-        {
-          video: true,
-          audio: false,
-        },
-      ];
-
+      stopCurrentCamera();
+      const cameraName = useFrontCamera ? "전면" : "후면";
       let lastError = null;
 
-      for (const constraints of candidates) {
+      for (const constraints of getCameraCandidates()) {
         try {
-          setStatus("카메라 권한 요청 중...");
+          setStatus(`${cameraName} 카메라 권한 요청 중...`);
           const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          currentStream = stream;
           video.srcObject = stream;
           video.muted = true;
           video.setAttribute("playsinline", "true");
@@ -687,7 +711,8 @@
           await video.play();
           resizeCanvasToDisplay();
 
-          setStatus("IDLE - 화면 터치로 색상 선택");
+          switchCameraBtn.textContent = useFrontCamera ? "BACK" : "FRONT";
+          setStatus(`IDLE - ${cameraName} 카메라 사용 중`);
           return;
         } catch (err) {
           console.error("Camera start failed:", err);
@@ -712,6 +737,16 @@
       await startCamera();
     });
 
+    switchCameraBtn.addEventListener("click", async () => {
+      if (state === "recording" || state === "waiting") {
+        setStatus("녹화 중에는 카메라 전환 불가");
+        return;
+      }
+      useFrontCamera = !useFrontCamera;
+      switchCameraBtn.textContent = useFrontCamera ? "BACK" : "FRONT";
+      await startCamera();
+    });
+
     recBtn.addEventListener("click", () => {
       if (["idle", "finished"].includes(state)) startRecordingWait();
       else if (state === "review") setStatus("먼저 저장 또는 폐기 선택");
@@ -726,6 +761,7 @@
     });
 
     window.addEventListener("resize", resizeCanvasToDisplay);
+    window.addEventListener("orientationchange", () => setTimeout(resizeCanvasToDisplay, 300));
 
     initSpellButtons();
     updateHsvUi();
