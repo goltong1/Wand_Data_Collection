@@ -52,22 +52,18 @@
       min-height: 0;
       display: flex;
       flex-direction: column;
-      overflow-y: auto;
-      overflow-x: hidden;
+      overflow: hidden;
     }
 
     .camera-wrap {
       position: relative;
-      width: 100%;
-      height: min(62vh, calc(100vh - 250px));
-      min-height: 260px;
-      max-height: 640px;
+      flex: 1;
+      min-height: 0;
       background: #000;
       display: flex;
       align-items: center;
       justify-content: center;
       touch-action: none;
-      flex-shrink: 0;
     }
 
     video,
@@ -125,17 +121,15 @@
       border-top: 1px solid #333;
       padding: 10px;
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       gap: 8px;
-      flex-shrink: 0;
     }
 
     button {
       border: 0;
       border-radius: 12px;
-      padding: 11px 6px;
-      min-height: 44px;
-      font-size: 13px;
+      padding: 12px 8px;
+      font-size: 14px;
       font-weight: 700;
       color: #fff;
       background: #333;
@@ -165,9 +159,8 @@
       background: #111;
       border-top: 1px solid #333;
       padding: 10px;
-      max-height: none;
-      overflow: visible;
-      flex-shrink: 0;
+      max-height: 34vh;
+      overflow-y: auto;
     }
 
     .spell-panel h2 {
@@ -180,57 +173,6 @@
       display: grid;
       grid-template-columns: repeat(3, 1fr);
       gap: 8px;
-    }
-
-    @media (max-width: 430px) {
-      header {
-        padding: 8px 10px;
-      }
-
-      header .title {
-        font-size: 13px;
-      }
-
-      header .status {
-        font-size: 11px;
-      }
-
-      .camera-wrap {
-        height: min(54vh, calc(100vh - 280px));
-        min-height: 220px;
-      }
-
-      .controls {
-        grid-template-columns: repeat(3, 1fr);
-        padding: 8px;
-        gap: 6px;
-      }
-
-      button {
-        font-size: 12px;
-        padding: 9px 4px;
-        min-height: 40px;
-      }
-
-      .spell-grid {
-        grid-template-columns: repeat(2, 1fr);
-        gap: 6px;
-      }
-
-      .spell-btn {
-        font-size: 10px;
-        padding: 9px 3px;
-      }
-
-      .hud-card {
-        font-size: 10px;
-        padding: 6px 8px;
-      }
-
-      .swatch {
-        width: 36px;
-        height: 36px;
-      }
     }
 
     .spell-btn {
@@ -277,7 +219,6 @@
 
       <div class="controls">
         <button id="cameraBtn">CAMERA</button>
-        <button id="switchCameraBtn">FRONT</button>
         <button class="primary" id="recBtn">REC</button>
         <button id="clearBtn">CLEAR</button>
         <button class="save" id="saveBtn" disabled>SAVE</button>
@@ -326,7 +267,6 @@
     const swatch = document.getElementById("swatch");
 
     const cameraBtn = document.getElementById("cameraBtn");
-    const switchCameraBtn = document.getElementById("switchCameraBtn");
     const recBtn = document.getElementById("recBtn");
     const clearBtn = document.getElementById("clearBtn");
     const saveBtn = document.getElementById("saveBtn");
@@ -334,8 +274,6 @@
     const spellGrid = document.getElementById("spellGrid");
 
     let selectedSpell = SPELLS[0];
-    let useFrontCamera = false;
-    let currentStream = null;
     let state = "idle";
     let waitStart = 0;
     let recordStart = 0;
@@ -695,39 +633,6 @@
       displayCtx.globalAlpha = 1.0;
     }
 
-    function stopCurrentCamera() {
-      if (!currentStream) return;
-      currentStream.getTracks().forEach((track) => track.stop());
-      currentStream = null;
-      video.srcObject = null;
-    }
-
-    function getCameraCandidates() {
-      const mode = useFrontCamera ? "user" : "environment";
-      return [
-        {
-          video: {
-            facingMode: { exact: mode },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-          audio: false,
-        },
-        {
-          video: {
-            facingMode: mode,
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-          audio: false,
-        },
-        {
-          video: true,
-          audio: false,
-        },
-      ];
-    }
-
     async function startCamera() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setStatus("이 브라우저는 카메라 API를 지원하지 않음");
@@ -741,15 +646,35 @@
         return;
       }
 
-      stopCurrentCamera();
-      let lastError = null;
-      const cameraName = useFrontCamera ? "전면" : "후면";
+      const candidates = [
+        {
+          video: {
+            facingMode: { exact: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        },
+        {
+          video: {
+            facingMode: "environment",
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        },
+        {
+          video: true,
+          audio: false,
+        },
+      ];
 
-      for (const constraints of getCameraCandidates()) {
+      let lastError = null;
+
+      for (const constraints of candidates) {
         try {
-          setStatus(`${cameraName} 카메라 권한 요청 중...`);
+          setStatus("카메라 권한 요청 중...");
           const stream = await navigator.mediaDevices.getUserMedia(constraints);
-          currentStream = stream;
           video.srcObject = stream;
           video.muted = true;
           video.setAttribute("playsinline", "true");
@@ -762,22 +687,15 @@
           await video.play();
           resizeCanvasToDisplay();
 
-          setStatus(`IDLE - ${cameraName} 카메라 사용 중`);
-          switchCameraBtn.textContent = useFrontCamera ? "BACK" : "FRONT";
+          setStatus("IDLE - 화면 터치로 색상 선택");
           return;
         } catch (err) {
-          console.error("cameraBtn.addEventListener("click", async () => {
-      await startCamera();
-    });
-
-    switchCameraBtn.addEventListener("click", async () => {
-      if (state === "recording" || state === "waiting") {
-        setStatus("녹화 중에는 카메라 변경 불가");
-        return;
+          console.error("Camera start failed:", err);
+          lastError = err;
+        }
       }
-      useFrontCamera = !useFrontCamera;
-      switchCameraBtn.textContent = useFrontCamera ? "BACK" : "FRONT";
-      await startCamera();st name = lastError?.name || "UnknownError";
+
+      const name = lastError?.name || "UnknownError";
       if (name === "NotAllowedError") {
         setStatus("카메라 권한이 거부됨");
         alert("브라우저 설정에서 카메라 권한을 허용해주세요.");
