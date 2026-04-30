@@ -4,6 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <title>Wand Motion Dataset Recorder</title>
+
+  <!-- ZIP export library -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
   <style>
     * {
       box-sizing: border-box;
@@ -122,7 +126,7 @@
       border-bottom: 1px solid #333;
       padding: 8px;
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 6px;
     }
 
@@ -152,6 +156,10 @@
 
     button.warn {
       background: #8f1b1b;
+    }
+
+    button.export {
+      background: #1565c0;
     }
 
     button:disabled {
@@ -190,7 +198,7 @@
     @media (min-width: 700px) {
       .camera-wrap { height: 50dvh; }
       .spell-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .controls { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+      .controls { grid-template-columns: repeat(8, minmax(0, 1fr)); }
     }
 
     .spell-btn.selected {
@@ -203,6 +211,7 @@
     }
   </style>
 </head>
+
 <body>
   <div id="app">
     <header>
@@ -234,6 +243,8 @@
         <button id="clearBtn">CLEAR</button>
         <button class="save" id="saveBtn" disabled>SAVE</button>
         <button class="warn" id="discardBtn" disabled>DISCARD</button>
+        <button class="export" id="exportBtn">EXPORT ZIP</button>
+        <button class="warn" id="clearSavedBtn">CLEAR SAVED</button>
       </div>
 
       <section class="spell-panel">
@@ -263,6 +274,10 @@
     const MIN_AREA = 300;
     const MAX_V_FOR_COLOR = 240;
 
+    const DB_NAME = "wand_motion_dataset_db";
+    const DB_VERSION = 1;
+    const STORE_NAME = "recordings";
+
     const video = document.getElementById("video");
     const cameraWrap = document.getElementById("cameraWrap");
     const displayCanvas = document.getElementById("displayCanvas");
@@ -283,6 +298,8 @@
     const clearBtn = document.getElementById("clearBtn");
     const saveBtn = document.getElementById("saveBtn");
     const discardBtn = document.getElementById("discardBtn");
+    const exportBtn = document.getElementById("exportBtn");
+    const clearSavedBtn = document.getElementById("clearSavedBtn");
     const spellGrid = document.getElementById("spellGrid");
 
     let selectedSpell = SPELLS[0];
@@ -303,23 +320,25 @@
     let pendingBlob = null;
     let pendingCsv = null;
 
-    const fileCounts = {};
-
     function initSpellButtons() {
       spellGrid.innerHTML = "";
+
       SPELLS.forEach((spell) => {
         const btn = document.createElement("button");
         btn.className = "spell-btn" + (spell === selectedSpell ? " selected" : "");
         btn.textContent = spell;
+
         btn.addEventListener("click", () => {
           if (state === "review") {
             setStatus("저장/폐기 후 라벨 변경 가능");
             return;
           }
+
           selectedSpell = spell;
           labelText.textContent = spell;
           initSpellButtons();
         });
+
         spellGrid.appendChild(btn);
       });
     }
@@ -335,10 +354,14 @@
     }
 
     function rgbToHsv(r, g, b) {
-      r /= 255; g /= 255; b /= 255;
+      r /= 255;
+      g /= 255;
+      b /= 255;
+
       const max = Math.max(r, g, b);
       const min = Math.min(r, g, b);
       const d = max - min;
+
       let h = 0;
       const s = max === 0 ? 0 : d / max;
       const v = max;
@@ -347,21 +370,30 @@
         if (max === r) h = ((g - b) / d) % 6;
         else if (max === g) h = (b - r) / d + 2;
         else h = (r - g) / d + 4;
+
         h *= 60;
         if (h < 0) h += 360;
       }
 
-      return [Math.round(h / 2), Math.round(s * 255), Math.round(v * 255)];
+      return [
+        Math.round(h / 2),
+        Math.round(s * 255),
+        Math.round(v * 255),
+      ];
     }
 
     function hsvToRgb(h, s, v) {
       h *= 2;
       s /= 255;
       v /= 255;
+
       const c = v * s;
       const x = c * (1 - Math.abs((h / 60) % 2 - 1));
       const m = v - c;
-      let rp = 0, gp = 0, bp = 0;
+
+      let rp = 0;
+      let gp = 0;
+      let bp = 0;
 
       if (h < 60) [rp, gp, bp] = [c, x, 0];
       else if (h < 120) [rp, gp, bp] = [x, c, 0];
@@ -380,17 +412,20 @@
     function updateHsvUi() {
       lowerText.textContent = hsvLower.join(",");
       upperText.textContent = hsvUpper.join(",");
+
       const mid = [
         Math.round((hsvLower[0] + hsvUpper[0]) / 2),
         Math.round((hsvLower[1] + hsvUpper[1]) / 2),
         Math.round((hsvLower[2] + hsvUpper[2]) / 2),
       ];
+
       const [r, g, b] = hsvToRgb(mid[0], mid[1], mid[2]);
       swatch.style.background = `rgb(${r}, ${g}, ${b})`;
     }
 
     function clearRecording() {
       trajectoryCtx.clearRect(0, 0, CAM_W, CAM_H);
+
       trajectoryData = [];
       prevPoint = null;
       currentPoint = null;
@@ -398,11 +433,17 @@
       pendingCsv = null;
       sampleFrameIndex = 0;
       lastSampleTime = 0;
+
       timeText.textContent = `0.0 / ${RECORD_DURATION.toFixed(1)}s`;
+
       saveBtn.disabled = true;
       discardBtn.disabled = true;
-      if (state !== "waiting" && state !== "recording") state = "idle";
-      setStatus("IDLE");
+
+      if (state !== "waiting" && state !== "recording") {
+        state = "idle";
+      }
+
+      updateSavedCountStatus("IDLE");
     }
 
     function startRecordingWait() {
@@ -415,8 +456,10 @@
     function enterReview() {
       state = "review";
       prevPoint = null;
+
       setStatus("REVIEW - 저장 또는 폐기 선택");
       timeText.textContent = `${RECORD_DURATION.toFixed(1)} / ${RECORD_DURATION.toFixed(1)}s`;
+
       saveBtn.disabled = false;
       discardBtn.disabled = false;
 
@@ -432,46 +475,27 @@
       return header + rows.map((r) => r.join(",")).join("\n");
     }
 
-    function getNextBaseName(label) {
-      fileCounts[label] = (fileCounts[label] || 0) + 1;
-      return `${label}_${String(fileCounts[label]).padStart(3, "0")}`;
-    }
-
     function downloadBlob(blob, filename) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
+
       a.href = url;
       a.download = filename;
+
       document.body.appendChild(a);
       a.click();
       a.remove();
+
       URL.revokeObjectURL(url);
     }
 
-    function saveRecording() {
-      if (!pendingCsv) return;
-      const base = getNextBaseName(selectedSpell);
+    function getUploadBaseName(label) {
+      const now = new Date();
+      const timestamp = now.toISOString().replace(/[:.]/g, "-");
+      const rand = Math.random().toString(36).slice(2, 8);
+      const safeLabel = String(label).replace(/[^a-zA-Z0-9_.-]/g, "_");
 
-      if (pendingBlob) {
-        downloadBlob(pendingBlob, `${base}.png`);
-      }
-
-      const csvBlob = new Blob([pendingCsv], { type: "text/csv;charset=utf-8" });
-      downloadBlob(csvBlob, `${base}.csv`);
-
-      state = "finished";
-      saveBtn.disabled = true;
-      discardBtn.disabled = true;
-      setStatus(`저장 완료: ${base}`);
-    }
-
-    function discardRecording() {
-      pendingBlob = null;
-      pendingCsv = null;
-      state = "finished";
-      saveBtn.disabled = true;
-      discardBtn.disabled = true;
-      setStatus("녹화 데이터 폐기");
+      return `${safeLabel}_${timestamp}_${rand}`;
     }
 
     function pickColorFromTouch(clientX, clientY) {
@@ -480,6 +504,7 @@
       const rect = displayCanvas.getBoundingClientRect();
       const x = Math.floor((clientX - rect.left) * displayCanvas.width / rect.width);
       const y = Math.floor((clientY - rect.top) * displayCanvas.height / rect.height);
+
       if (x < 0 || y < 0 || x >= displayCanvas.width || y >= displayCanvas.height) return;
 
       const pixel = displayCtx.getImageData(x, y, 1, 1).data;
@@ -490,11 +515,13 @@
       const lowerS = Math.max(30, s - S_TOL);
       const upperS = 255;
       const lowerV = Math.max(30, v - V_TOL);
+
       let upperV = Math.min(MAX_V_FOR_COLOR, v + V_TOL);
       if (upperV <= lowerV) upperV = Math.min(255, lowerV + 30);
 
       hsvLower = [lowerH, lowerS, lowerV];
       hsvUpper = [upperH, upperS, upperV];
+
       updateHsvUi();
       setStatus(`색상 선택 HSV(${h},${s},${v})`);
     }
@@ -502,7 +529,11 @@
     function getVideoSourceRect(videoW, videoH, canvasW, canvasH) {
       const videoRatio = videoW / videoH;
       const canvasRatio = canvasW / canvasH;
-      let sx = 0, sy = 0, sw = videoW, sh = videoH;
+
+      let sx = 0;
+      let sy = 0;
+      let sw = videoW;
+      let sh = videoH;
 
       if (videoRatio > canvasRatio) {
         sw = videoH * canvasRatio;
@@ -511,6 +542,7 @@
         sh = videoW / canvasRatio;
         sy = (videoH - sh) / 2;
       }
+
       return { sx, sy, sw, sh };
     }
 
@@ -522,14 +554,17 @@
       let count = 0;
       let sumX = 0;
       let sumY = 0;
+
       const step = 2;
 
       for (let y = 0; y < h; y += step) {
         for (let x = 0; x < w; x += step) {
           const idx = (y * w + x) * 4;
+
           const r = data[idx];
           const g = data[idx + 1];
           const b = data[idx + 2];
+
           const [hh, ss, vv] = rgbToHsv(r, g, b);
 
           if (
@@ -545,6 +580,7 @@
       }
 
       if (count * step * step < MIN_AREA) return null;
+
       return {
         x: Math.round(sumX / count),
         y: Math.round(sumY / count),
@@ -555,6 +591,7 @@
     function drawTrajectoryPoint(point) {
       const sx = CAM_W / displayCanvas.width;
       const sy = CAM_H / displayCanvas.height;
+
       const tx = point.x * sx;
       const ty = point.y * sy;
 
@@ -566,12 +603,266 @@
       if (prevPoint) {
         const px = prevPoint.x * sx;
         const py = prevPoint.y * sy;
+
         trajectoryCtx.beginPath();
         trajectoryCtx.moveTo(px, py);
         trajectoryCtx.lineTo(tx, ty);
         trajectoryCtx.stroke();
       }
+
       prevPoint = point;
+    }
+
+    function openDatasetDb() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+        request.onupgradeneeded = (event) => {
+          const db = event.target.result;
+
+          if (!db.objectStoreNames.contains(STORE_NAME)) {
+            const store = db.createObjectStore(STORE_NAME, {
+              keyPath: "id",
+              autoIncrement: true,
+            });
+
+            store.createIndex("label", "label", { unique: false });
+            store.createIndex("baseName", "baseName", { unique: true });
+            store.createIndex("createdAt", "createdAt", { unique: false });
+          }
+        };
+
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async function saveRecordingToIndexedDb(record) {
+      const db = await openDatasetDb();
+
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+
+        store.add(record);
+
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+
+        tx.onerror = () => {
+          db.close();
+          reject(tx.error);
+        };
+      });
+    }
+
+    async function getAllRecordingsFromIndexedDb() {
+      const db = await openDatasetDb();
+
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.getAll();
+
+        request.onsuccess = () => {
+          db.close();
+          resolve(request.result);
+        };
+
+        request.onerror = () => {
+          db.close();
+          reject(request.error);
+        };
+      });
+    }
+
+    async function clearIndexedDbRecordings() {
+      const db = await openDatasetDb();
+
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+
+        store.clear();
+
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+
+        tx.onerror = () => {
+          db.close();
+          reject(tx.error);
+        };
+      });
+    }
+
+    async function getSavedCount() {
+      const db = await openDatasetDb();
+
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.count();
+
+        request.onsuccess = () => {
+          db.close();
+          resolve(request.result);
+        };
+
+        request.onerror = () => {
+          db.close();
+          reject(request.error);
+        };
+      });
+    }
+
+    async function updateSavedCountStatus(prefix = "IDLE") {
+      try {
+        const count = await getSavedCount();
+        setStatus(`${prefix} / SAVED: ${count}`);
+      } catch (err) {
+        console.error(err);
+        setStatus(prefix);
+      }
+    }
+
+    async function saveRecording() {
+      if (!pendingCsv) return;
+
+      const base = getUploadBaseName(selectedSpell);
+
+      try {
+        setStatus("브라우저 내부 저장 중...");
+
+        const record = {
+          label: selectedSpell,
+          baseName: base,
+          createdAt: new Date().toISOString(),
+          pngBlob: pendingBlob,
+          csvText: pendingCsv,
+          targetFps: TARGET_FPS,
+          recordDuration: RECORD_DURATION,
+          camWidth: CAM_W,
+          camHeight: CAM_H,
+          hsvLower: [...hsvLower],
+          hsvUpper: [...hsvUpper],
+        };
+
+        await saveRecordingToIndexedDb(record);
+
+        state = "finished";
+        saveBtn.disabled = true;
+        discardBtn.disabled = true;
+
+        pendingBlob = null;
+        pendingCsv = null;
+
+        await updateSavedCountStatus(`저장 완료: ${base}`);
+      } catch (err) {
+        console.error(err);
+        setStatus("브라우저 저장 실패");
+        alert("브라우저 내부 저장에 실패했습니다.");
+      }
+    }
+
+    function discardRecording() {
+      pendingBlob = null;
+      pendingCsv = null;
+
+      state = "finished";
+
+      saveBtn.disabled = true;
+      discardBtn.disabled = true;
+
+      updateSavedCountStatus("녹화 데이터 폐기");
+    }
+
+    async function exportAllRecordingsAsZip() {
+      try {
+        const records = await getAllRecordingsFromIndexedDb();
+
+        if (!records.length) {
+          alert("내보낼 저장 데이터가 없습니다.");
+          setStatus("저장 데이터 없음");
+          return;
+        }
+
+        if (typeof JSZip === "undefined") {
+          alert("JSZip 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인해주세요.");
+          setStatus("ZIP 라이브러리 로드 실패");
+          return;
+        }
+
+        setStatus(`ZIP 생성 중... ${records.length}개`);
+
+        const zip = new JSZip();
+
+        records.forEach((record) => {
+          const label = record.label || "unknown";
+          const baseName = record.baseName || `record_${record.id}`;
+          const safeLabel = String(label).replace(/[^a-zA-Z0-9_.-]/g, "_");
+
+          const folder = zip.folder(safeLabel);
+
+          if (record.pngBlob) {
+            folder.file(`${baseName}.png`, record.pngBlob);
+          }
+
+          if (record.csvText) {
+            folder.file(`${baseName}.csv`, record.csvText);
+          }
+
+          const meta = {
+            id: record.id,
+            label: record.label,
+            baseName: record.baseName,
+            createdAt: record.createdAt,
+            targetFps: record.targetFps,
+            recordDuration: record.recordDuration,
+            camWidth: record.camWidth,
+            camHeight: record.camHeight,
+            hsvLower: record.hsvLower,
+            hsvUpper: record.hsvUpper,
+          };
+
+          folder.file(`${baseName}.json`, JSON.stringify(meta, null, 2));
+        });
+
+        const zipBlob = await zip.generateAsync({
+          type: "blob",
+          compression: "DEFLATE",
+          compressionOptions: {
+            level: 6,
+          },
+        });
+
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+        downloadBlob(zipBlob, `wand_dataset_${timestamp}.zip`);
+
+        setStatus(`ZIP 내보내기 완료: ${records.length}개`);
+      } catch (err) {
+        console.error(err);
+        setStatus("ZIP 내보내기 실패");
+        alert("ZIP 내보내기에 실패했습니다.");
+      }
+    }
+
+    async function clearSavedDataset() {
+      const ok = confirm("브라우저에 저장된 모든 녹화 데이터를 삭제할까요? 이 작업은 되돌릴 수 없습니다.");
+
+      if (!ok) return;
+
+      try {
+        await clearIndexedDbRecordings();
+        setStatus("저장 데이터 전체 삭제 완료");
+      } catch (err) {
+        console.error(err);
+        setStatus("저장 데이터 삭제 실패");
+        alert("저장 데이터 삭제에 실패했습니다.");
+      }
     }
 
     function drawLoop() {
@@ -580,13 +871,25 @@
       if (!video.videoWidth || !video.videoHeight) return;
 
       const now = performance.now() / 1000;
-      const { sx, sy, sw, sh } = getVideoSourceRect(video.videoWidth, video.videoHeight, displayCanvas.width, displayCanvas.height);
+
+      const { sx, sy, sw, sh } = getVideoSourceRect(
+        video.videoWidth,
+        video.videoHeight,
+        displayCanvas.width,
+        displayCanvas.height
+      );
 
       displayCtx.save();
       displayCtx.clearRect(0, 0, displayCanvas.width, displayCanvas.height);
       displayCtx.translate(displayCanvas.width, 0);
       displayCtx.scale(-1, 1);
-      displayCtx.drawImage(video, sx, sy, sw, sh, 0, 0, displayCanvas.width, displayCanvas.height);
+      displayCtx.drawImage(
+        video,
+        sx, sy, sw, sh,
+        0, 0,
+        displayCanvas.width,
+        displayCanvas.height
+      );
       displayCtx.restore();
 
       const frame = displayCtx.getImageData(0, 0, displayCanvas.width, displayCanvas.height);
@@ -595,6 +898,7 @@
       if (state === "waiting") {
         const remain = Math.max(0, WAIT_DURATION - (now - waitStart));
         setStatus(`START IN ${remain.toFixed(1)}s`);
+
         if (remain <= 0) {
           state = "recording";
           recordStart = now;
@@ -607,31 +911,46 @@
 
       if (state === "recording") {
         const elapsed = now - recordStart;
+
         timeText.textContent = `${Math.min(elapsed, RECORD_DURATION).toFixed(1)} / ${RECORD_DURATION.toFixed(1)}s`;
 
-        if (currentPoint) drawTrajectoryPoint(currentPoint);
-        else prevPoint = null;
+        if (currentPoint) {
+          drawTrajectoryPoint(currentPoint);
+        } else {
+          prevPoint = null;
+        }
 
         while (now - lastSampleTime >= SAMPLE_INTERVAL) {
           const ts = Number((sampleFrameIndex * SAMPLE_INTERVAL).toFixed(4));
+
           if (currentPoint) {
-            const sx = CAM_W / displayCanvas.width;
-            const sy = CAM_H / displayCanvas.height;
+            const sx2 = CAM_W / displayCanvas.width;
+            const sy2 = CAM_H / displayCanvas.height;
+
             trajectoryData.push([
               sampleFrameIndex,
               ts,
-              Math.round(currentPoint.x * sx),
-              Math.round(currentPoint.y * sy),
+              Math.round(currentPoint.x * sx2),
+              Math.round(currentPoint.y * sy2),
               1,
             ]);
           } else {
-            trajectoryData.push([sampleFrameIndex, ts, "", "", 0]);
+            trajectoryData.push([
+              sampleFrameIndex,
+              ts,
+              "",
+              "",
+              0,
+            ]);
           }
+
           sampleFrameIndex++;
           lastSampleTime += SAMPLE_INTERVAL;
         }
 
-        if (elapsed >= RECORD_DURATION) enterReview();
+        if (elapsed >= RECORD_DURATION) {
+          enterReview();
+        }
       }
 
       if (currentPoint) {
@@ -649,6 +968,7 @@
 
     function stopCurrentCamera() {
       if (!currentStream) return;
+
       currentStream.getTracks().forEach((track) => track.stop());
       currentStream = null;
       video.srcObject = null;
@@ -656,6 +976,7 @@
 
     function getCameraCandidates() {
       const mode = useFrontCamera ? "user" : "environment";
+
       return [
         {
           video: {
@@ -673,7 +994,10 @@
           },
           audio: false,
         },
-        { video: true, audio: false },
+        {
+          video: true,
+          audio: false,
+        },
       ];
     }
 
@@ -683,7 +1007,11 @@
         return;
       }
 
-      const isSecure = location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1";
+      const isSecure =
+        location.protocol === "https:" ||
+        location.hostname === "localhost" ||
+        location.hostname === "127.0.0.1";
+
       if (!isSecure) {
         setStatus("카메라는 HTTPS 또는 localhost에서만 작동함");
         alert("모바일 브라우저 카메라는 HTTPS 환경에서 실행해야 합니다. file:// 또는 http://에서는 카메라가 안 뜰 수 있습니다.");
@@ -691,13 +1019,16 @@
       }
 
       stopCurrentCamera();
+
       const cameraName = useFrontCamera ? "전면" : "후면";
       let lastError = null;
 
       for (const constraints of getCameraCandidates()) {
         try {
           setStatus(`${cameraName} 카메라 권한 요청 중...`);
+
           const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
           currentStream = stream;
           video.srcObject = stream;
           video.muted = true;
@@ -709,10 +1040,13 @@
           });
 
           await video.play();
+
           resizeCanvasToDisplay();
 
           switchCameraBtn.textContent = useFrontCamera ? "BACK" : "FRONT";
-          setStatus(`IDLE - ${cameraName} 카메라 사용 중`);
+
+          await updateSavedCountStatus(`IDLE - ${cameraName} 카메라 사용 중`);
+
           return;
         } catch (err) {
           console.error("Camera start failed:", err);
@@ -721,6 +1055,7 @@
       }
 
       const name = lastError?.name || "UnknownError";
+
       if (name === "NotAllowedError") {
         setStatus("카메라 권한이 거부됨");
         alert("브라우저 설정에서 카메라 권한을 허용해주세요.");
@@ -742,31 +1077,55 @@
         setStatus("녹화 중에는 카메라 전환 불가");
         return;
       }
+
       useFrontCamera = !useFrontCamera;
       switchCameraBtn.textContent = useFrontCamera ? "BACK" : "FRONT";
+
       await startCamera();
     });
 
     recBtn.addEventListener("click", () => {
-      if (["idle", "finished"].includes(state)) startRecordingWait();
-      else if (state === "review") setStatus("먼저 저장 또는 폐기 선택");
+      if (["idle", "finished"].includes(state)) {
+        startRecordingWait();
+      } else if (state === "review") {
+        setStatus("먼저 저장 또는 폐기 선택");
+      }
     });
 
-    clearBtn.addEventListener("click", () => clearRecording());
-    saveBtn.addEventListener("click", () => saveRecording());
-    discardBtn.addEventListener("click", () => discardRecording());
+    clearBtn.addEventListener("click", () => {
+      clearRecording();
+    });
+
+    saveBtn.addEventListener("click", () => {
+      saveRecording();
+    });
+
+    discardBtn.addEventListener("click", () => {
+      discardRecording();
+    });
+
+    exportBtn.addEventListener("click", () => {
+      exportAllRecordingsAsZip();
+    });
+
+    clearSavedBtn.addEventListener("click", () => {
+      clearSavedDataset();
+    });
 
     cameraWrap.addEventListener("click", (e) => {
       pickColorFromTouch(e.clientX, e.clientY);
     });
 
     window.addEventListener("resize", resizeCanvasToDisplay);
-    window.addEventListener("orientationchange", () => setTimeout(resizeCanvasToDisplay, 300));
+
+    window.addEventListener("orientationchange", () => {
+      setTimeout(resizeCanvasToDisplay, 300);
+    });
 
     initSpellButtons();
     updateHsvUi();
     resizeCanvasToDisplay();
-    setStatus("CAMERA 버튼을 눌러 카메라 시작");
+    updateSavedCountStatus("CAMERA 버튼을 눌러 카메라 시작");
     drawLoop();
   </script>
 </body>
