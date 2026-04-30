@@ -59,17 +59,14 @@
       top: 52px;
       right: 10px;
       z-index: 9999;
-
       background: #6a1b9a;
       color: #fff;
       border: 2px solid #fff;
       border-radius: 999px;
-
       padding: 10px 14px;
       min-height: 44px;
       font-size: 12px;
       font-weight: 800;
-
       box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
     }
 
@@ -219,6 +216,11 @@
       word-break: break-word;
     }
 
+    .spell-btn.selected {
+      background: #ffd54a;
+      color: #111;
+    }
+
     @media (min-width: 700px) {
       .camera-wrap {
         height: 50dvh;
@@ -235,15 +237,6 @@
       header .status {
         padding-right: 128px;
       }
-    }
-
-    .spell-btn.selected {
-      background: #ffd54a;
-      color: #111;
-    }
-
-    .hidden {
-      display: none !important;
     }
   </style>
 </head>
@@ -548,6 +541,12 @@
       const safeLabel = safePathName(label);
 
       return `${safeLabel}_${timestamp}_${rand}`;
+    }
+
+    function isDuplicateStorageError(err) {
+      const msg = String(err?.message || err || "").toLowerCase();
+      const code = String(err?.statusCode || err?.status || "");
+      return code === "409" || msg.includes("already exists") || msg.includes("duplicate");
     }
 
     function pickColorFromTouch(clientX, clientY) {
@@ -902,6 +901,42 @@
       }
     }
 
+    async function uploadStorageObject(path, body, contentType) {
+      const { error } = await supabaseClient
+        .storage
+        .from(SUPABASE_BUCKET)
+        .upload(path, body, {
+          contentType,
+          upsert: false,
+        });
+
+      if (error && !isDuplicateStorageError(error)) {
+        throw error;
+      }
+    }
+
+    async function insertRecordingMetadata(record, pngPath, csvPath) {
+      const { error } = await supabaseClient
+        .from("recordings")
+        .insert({
+          label: record.label,
+          base_name: record.baseName,
+          png_path: record.pngBlob ? pngPath : null,
+          csv_path: record.csvText ? csvPath : null,
+          local_created_at: record.createdAt,
+          target_fps: record.targetFps,
+          record_duration: record.recordDuration,
+          cam_width: record.camWidth,
+          cam_height: record.camHeight,
+          hsv_lower: record.hsvLower || null,
+          hsv_upper: record.hsvUpper || null,
+        });
+
+      if (error) {
+        throw error;
+      }
+    }
+
     async function uploadAllRecordingsToSupabase() {
       try {
         const records = await getAllRecordingsFromIndexedDb();
@@ -937,15 +972,11 @@
 
           try {
             if (record.pngBlob) {
-              const { error: pngError } = await supabaseClient
-                .storage
-                .from(SUPABASE_BUCKET)
-                .upload(pngPath, record.pngBlob, {
-                  contentType: "image/png",
-                  upsert: true,
-                });
-
-              if (pngError) throw pngError;
+              await uploadStorageObject(
+                pngPath,
+                record.pngBlob,
+                "image/png"
+              );
             }
 
             if (record.csvText) {
@@ -953,36 +984,14 @@
                 type: "text/csv;charset=utf-8",
               });
 
-              const { error: csvError } = await supabaseClient
-                .storage
-                .from(SUPABASE_BUCKET)
-                .upload(csvPath, csvBlob, {
-                  contentType: "text/csv;charset=utf-8",
-                  upsert: true,
-                });
-
-              if (csvError) throw csvError;
+              await uploadStorageObject(
+                csvPath,
+                csvBlob,
+                "text/csv;charset=utf-8"
+              );
             }
 
-            const { error: dbError } = await supabaseClient
-              .from("recordings")
-              .upsert({
-                label: record.label,
-                base_name: record.baseName,
-                png_path: record.pngBlob ? pngPath : null,
-                csv_path: record.csvText ? csvPath : null,
-                local_created_at: record.createdAt,
-                target_fps: record.targetFps,
-                record_duration: record.recordDuration,
-                cam_width: record.camWidth,
-                cam_height: record.camHeight,
-                hsv_lower: record.hsvLower || null,
-                hsv_upper: record.hsvUpper || null,
-              }, {
-                onConflict: "base_name",
-              });
-
-            if (dbError) throw dbError;
+            await insertRecordingMetadata(record, pngPath, csvPath);
 
             successCount++;
           } catch (err) {
