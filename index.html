@@ -8,6 +8,9 @@
   <!-- ZIP export library -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
+  <!-- Supabase library -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
   <style>
     * {
       box-sizing: border-box;
@@ -126,7 +129,7 @@
       border-bottom: 1px solid #333;
       padding: 8px;
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 6px;
     }
 
@@ -160,6 +163,10 @@
 
     button.export {
       background: #1565c0;
+    }
+
+    button.upload {
+      background: #6a1b9a;
     }
 
     button:disabled {
@@ -198,7 +205,7 @@
     @media (min-width: 700px) {
       .camera-wrap { height: 50dvh; }
       .spell-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .controls { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+      .controls { grid-template-columns: repeat(9, minmax(0, 1fr)); }
     }
 
     .spell-btn.selected {
@@ -244,6 +251,7 @@
         <button class="save" id="saveBtn" disabled>SAVE</button>
         <button class="warn" id="discardBtn" disabled>DISCARD</button>
         <button class="export" id="exportBtn">EXPORT ZIP</button>
+        <button class="upload" id="uploadAllBtn">UPLOAD ALL</button>
         <button class="warn" id="clearSavedBtn">CLEAR SAVED</button>
       </div>
 
@@ -278,6 +286,15 @@
     const DB_VERSION = 1;
     const STORE_NAME = "recordings";
 
+    const SUPABASE_URL = "https://lutmcriwrmmcrjilrlqm.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_PZ_pFOf8UG8Z_Vco4TiaVg_71uar0ej";
+    const SUPABASE_BUCKET = "wand-dataset";
+
+    const supabaseClient = supabase.createClient(
+      SUPABASE_URL,
+      SUPABASE_ANON_KEY
+    );
+
     const video = document.getElementById("video");
     const cameraWrap = document.getElementById("cameraWrap");
     const displayCanvas = document.getElementById("displayCanvas");
@@ -299,6 +316,7 @@
     const saveBtn = document.getElementById("saveBtn");
     const discardBtn = document.getElementById("discardBtn");
     const exportBtn = document.getElementById("exportBtn");
+    const uploadAllBtn = document.getElementById("uploadAllBtn");
     const clearSavedBtn = document.getElementById("clearSavedBtn");
     const spellGrid = document.getElementById("spellGrid");
 
@@ -489,11 +507,15 @@
       URL.revokeObjectURL(url);
     }
 
+    function safePathName(name) {
+      return String(name).replace(/[^a-zA-Z0-9_.-]/g, "_");
+    }
+
     function getUploadBaseName(label) {
       const now = new Date();
       const timestamp = now.toISOString().replace(/[:.]/g, "-");
       const rand = Math.random().toString(36).slice(2, 8);
-      const safeLabel = String(label).replace(/[^a-zA-Z0-9_.-]/g, "_");
+      const safeLabel = safePathName(label);
 
       return `${safeLabel}_${timestamp}_${rand}`;
     }
@@ -803,7 +825,7 @@
         records.forEach((record) => {
           const label = record.label || "unknown";
           const baseName = record.baseName || `record_${record.id}`;
-          const safeLabel = String(label).replace(/[^a-zA-Z0-9_.-]/g, "_");
+          const safeLabel = safePathName(label);
 
           const folder = zip.folder(safeLabel);
 
@@ -847,6 +869,114 @@
         console.error(err);
         setStatus("ZIP 내보내기 실패");
         alert("ZIP 내보내기에 실패했습니다.");
+      }
+    }
+
+    async function uploadAllRecordingsToSupabase() {
+      try {
+        const records = await getAllRecordingsFromIndexedDb();
+
+        if (!records.length) {
+          alert("업로드할 저장 데이터가 없습니다.");
+          setStatus("업로드할 데이터 없음");
+          return;
+        }
+
+        const ok = confirm(`${records.length}개 녹화 데이터를 Supabase로 업로드할까요?`);
+        if (!ok) return;
+
+        uploadAllBtn.disabled = true;
+        exportBtn.disabled = true;
+        clearSavedBtn.disabled = true;
+
+        setStatus(`Supabase 업로드 시작... 0 / ${records.length}`);
+
+        let successCount = 0;
+        let failCount = 0;
+
+        for (let i = 0; i < records.length; i++) {
+          const record = records[i];
+
+          const label = safePathName(record.label || "unknown");
+          const baseName = safePathName(record.baseName || `record_${record.id}`);
+
+          const pngPath = `${label}/${baseName}.png`;
+          const csvPath = `${label}/${baseName}.csv`;
+
+          setStatus(`업로드 중... ${i + 1} / ${records.length}`);
+
+          try {
+            if (record.pngBlob) {
+              const { error: pngError } = await supabaseClient
+                .storage
+                .from(SUPABASE_BUCKET)
+                .upload(pngPath, record.pngBlob, {
+                  contentType: "image/png",
+                  upsert: true,
+                });
+
+              if (pngError) throw pngError;
+            }
+
+            if (record.csvText) {
+              const csvBlob = new Blob([record.csvText], {
+                type: "text/csv;charset=utf-8",
+              });
+
+              const { error: csvError } = await supabaseClient
+                .storage
+                .from(SUPABASE_BUCKET)
+                .upload(csvPath, csvBlob, {
+                  contentType: "text/csv;charset=utf-8",
+                  upsert: true,
+                });
+
+              if (csvError) throw csvError;
+            }
+
+            const { error: dbError } = await supabaseClient
+              .from("recordings")
+              .upsert({
+                label: record.label,
+                base_name: record.baseName,
+                png_path: record.pngBlob ? pngPath : null,
+                csv_path: record.csvText ? csvPath : null,
+                local_created_at: record.createdAt,
+                target_fps: record.targetFps,
+                record_duration: record.recordDuration,
+                cam_width: record.camWidth,
+                cam_height: record.camHeight,
+                hsv_lower: record.hsvLower || null,
+                hsv_upper: record.hsvUpper || null,
+              }, {
+                onConflict: "base_name",
+              });
+
+            if (dbError) throw dbError;
+
+            successCount++;
+          } catch (err) {
+            console.error("Upload failed:", record, err);
+            failCount++;
+          }
+        }
+
+        setStatus(`업로드 완료: 성공 ${successCount}, 실패 ${failCount}`);
+
+        if (failCount > 0) {
+          alert(`일부 업로드 실패\n성공: ${successCount}\n실패: ${failCount}\n브라우저 콘솔 로그를 확인하세요.`);
+        } else {
+          alert(`Supabase 업로드 완료: ${successCount}개`);
+        }
+
+      } catch (err) {
+        console.error(err);
+        setStatus("Supabase 업로드 실패");
+        alert("Supabase 업로드 중 오류가 발생했습니다.");
+      } finally {
+        uploadAllBtn.disabled = false;
+        exportBtn.disabled = false;
+        clearSavedBtn.disabled = false;
       }
     }
 
@@ -1106,6 +1236,10 @@
 
     exportBtn.addEventListener("click", () => {
       exportAllRecordingsAsZip();
+    });
+
+    uploadAllBtn.addEventListener("click", () => {
+      uploadAllRecordingsToSupabase();
     });
 
     clearSavedBtn.addEventListener("click", () => {
