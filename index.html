@@ -352,6 +352,18 @@
     let lastSampleTime = 0;
     let sampleFrameIndex = 0;
 
+    let mediaRecorder = null;
+    let recordedVideoChunks = [];
+    let pendingVideoBlob = null;
+    let pendingVideoReadyPromise = Promise.resolve(null);
+    let capturedFramePromises = [];
+    let pendingFrameFiles = [];
+
+    const rawFrameCanvas = document.createElement("canvas");
+    rawFrameCanvas.width = CAM_W;
+    rawFrameCanvas.height = CAM_H;
+    const rawFrameCtx = rawFrameCanvas.getContext("2d");
+
     let hsvLower = [30, 70, 70];
     let hsvUpper = [80, 255, 255];
 
@@ -472,6 +484,10 @@
       currentPoint = null;
       pendingBlob = null;
       pendingCsv = null;
+      pendingVideoBlob = null;
+      pendingVideoReadyPromise = Promise.resolve(null);
+      capturedFramePromises = [];
+      pendingFrameFiles = [];
       sampleFrameIndex = 0;
       lastSampleTime = 0;
 
@@ -497,6 +513,11 @@
     function enterReview() {
       state = "review";
       prevPoint = null;
+      stopRawVideoCapture();
+
+      Promise.all(capturedFramePromises).then((frames) => {
+        pendingFrameFiles = frames.filter(Boolean);
+      });
 
       setStatus("REVIEW - 저장 또는 폐기 선택");
       timeText.textContent = `${RECORD_DURATION.toFixed(1)} / ${RECORD_DURATION.toFixed(1)}s`;
@@ -595,6 +616,117 @@
       }
 
       return { sx, sy, sw, sh };
+    }
+
+    function getSupportedVideoMimeType() {
+      const candidates = [
+        "video/webm;codecs=vp9",
+        "video/webm;codecs=vp8",
+        "video/webm",
+      ];
+
+      if (typeof MediaRecorder === "undefined") return "";
+
+      return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+    }
+
+    function startRawVideoCapture() {
+      pendingVideoBlob = null;
+      recordedVideoChunks = [];
+      pendingVideoReadyPromise = Promise.resolve(null);
+
+      if (!currentStream || typeof MediaRecorder === "undefined") {
+        setStatus("이 브라우저는 동영상 녹화를 지원하지 않음");
+        return;
+      }
+
+      const mimeType = getSupportedVideoMimeType();
+      const options = mimeType ? { mimeType } : undefined;
+
+      try {
+        mediaRecorder = new MediaRecorder(currentStream, options);
+
+        pendingVideoReadyPromise = new Promise((resolve) => {
+          mediaRecorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+              recordedVideoChunks.push(event.data);
+            }
+          };
+
+          mediaRecorder.onstop = () => {
+            const type = mediaRecorder.mimeType || mimeType || "video/webm";
+            pendingVideoBlob = recordedVideoChunks.length
+              ? new Blob(recordedVideoChunks, { type })
+              : null;
+            resolve(pendingVideoBlob);
+          };
+
+          mediaRecorder.onerror = (event) => {
+            console.error("MediaRecorder error:", event.error || event);
+            resolve(null);
+          };
+        });
+
+        mediaRecorder.start();
+      } catch (err) {
+        console.error("Video capture start failed:", err);
+        mediaRecorder = null;
+        pendingVideoReadyPromise = Promise.resolve(null);
+      }
+    }
+
+    function stopRawVideoCapture() {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        try {
+          mediaRecorder.stop();
+        } catch (err) {
+          console.error("Video capture stop failed:", err);
+        }
+      }
+    }
+
+    function drawRawVideoFrameToCanvas() {
+      if (!video.videoWidth || !video.videoHeight) return false;
+
+      const { sx, sy, sw, sh } = getVideoSourceRect(
+        video.videoWidth,
+        video.videoHeight,
+        CAM_W,
+        CAM_H
+      );
+
+      rawFrameCtx.save();
+      rawFrameCtx.clearRect(0, 0, CAM_W, CAM_H);
+      rawFrameCtx.translate(CAM_W, 0);
+      rawFrameCtx.scale(-1, 1);
+      rawFrameCtx.drawImage(video, sx, sy, sw, sh, 0, 0, CAM_W, CAM_H);
+      rawFrameCtx.restore();
+
+      return true;
+    }
+
+    function captureRawFrame(frameIndex, timestamp) {
+      if (!drawRawVideoFrameToCanvas()) return;
+
+      const filename = `frames/frame_${String(frameIndex).padStart(4, "0")}.png`;
+
+      const framePromise = new Promise((resolve) => {
+        rawFrameCanvas.toBlob((blob) => {
+          if (!blob) {
+            resolve(null);
+            return;
+          }
+
+          resolve({
+            filename,
+            blob,
+            frame: frameIndex,
+            timestamp,
+          });
+        }, "image/png");
+      });
+
+      capturedFramePromises.push(framePromise);
     }
 
     function detectPoint(imageData) {
@@ -788,12 +920,22 @@
       try {
         setStatus("브라우저 내부 저장 중...");
 
+        const [videoBlob, frameFiles] = await Promise.all([
+          pendingVideoReadyPromise,
+          Promise.all(capturedFramePromises).then((frames) => frames.filter(Boolean)),
+        ]);
+
+        pendingVideoBlob = videoBlob;
+        pendingFrameFiles = frameFiles;
+
         const record = {
           label: selectedSpell,
           baseName: base,
           createdAt: new Date().toISOString(),
           pngBlob: pendingBlob,
           csvText: pendingCsv,
+          videoBlob: pendingVideoBlob,
+          frameFiles: pendingFrameFiles,
           targetFps: TARGET_FPS,
           recordDuration: RECORD_DURATION,
           camWidth: CAM_W,
@@ -810,6 +952,9 @@
 
         pendingBlob = null;
         pendingCsv = null;
+        pendingVideoBlob = null;
+        pendingFrameFiles = [];
+        capturedFramePromises = [];
 
         await updateSavedCountStatus(`저장 완료: ${base}`);
       } catch (err) {
@@ -820,8 +965,12 @@
     }
 
     function discardRecording() {
+      stopRawVideoCapture();
       pendingBlob = null;
       pendingCsv = null;
+      pendingVideoBlob = null;
+      pendingFrameFiles = [];
+      capturedFramePromises = [];
 
       state = "finished";
 
@@ -862,6 +1011,21 @@
             folder.file(`${baseName}.png`, record.pngBlob);
           }
 
+          if (record.videoBlob) {
+            folder.file(`${baseName}.webm`, record.videoBlob);
+          }
+
+          if (Array.isArray(record.frameFiles)) {
+            const frameFolder = folder.folder(`${baseName}_frames`);
+
+            record.frameFiles.forEach((frameFile) => {
+              if (frameFile?.blob && frameFile?.filename) {
+                const frameName = frameFile.filename.replace(/^frames\//, "");
+                frameFolder.file(frameName, frameFile.blob);
+              }
+            });
+          }
+
           if (record.csvText) {
             folder.file(`${baseName}.csv`, record.csvText);
           }
@@ -877,6 +1041,10 @@
             camHeight: record.camHeight,
             hsvLower: record.hsvLower,
             hsvUpper: record.hsvUpper,
+            hasVideo: Boolean(record.videoBlob),
+            videoFormat: record.videoBlob?.type || null,
+            frameCount: Array.isArray(record.frameFiles) ? record.frameFiles.length : 0,
+            frameImageFormat: "image/png",
           };
 
           folder.file(`${baseName}.json`, JSON.stringify(meta, null, 2));
@@ -967,6 +1135,8 @@
 
           const pngPath = `${label}/${baseName}.png`;
           const csvPath = `${label}/${baseName}.csv`;
+          const videoPath = `${label}/${baseName}.webm`;
+          const frameBasePath = `${label}/${baseName}_frames`;
 
           setStatus(`업로드 중... ${i + 1} / ${records.length}`);
 
@@ -977,6 +1147,28 @@
                 record.pngBlob,
                 "image/png"
               );
+            }
+
+            if (record.videoBlob) {
+              await uploadStorageObject(
+                videoPath,
+                record.videoBlob,
+                record.videoBlob.type || "video/webm"
+              );
+            }
+
+            if (Array.isArray(record.frameFiles)) {
+              for (const frameFile of record.frameFiles) {
+                if (!frameFile?.blob || !frameFile?.filename) continue;
+
+                const frameName = frameFile.filename.replace(/^frames\//, "");
+
+                await uploadStorageObject(
+                  `${frameBasePath}/${frameName}`,
+                  frameFile.blob,
+                  "image/png"
+                );
+              }
             }
 
             if (record.csvText) {
@@ -1073,6 +1265,9 @@
           lastSampleTime = now;
           sampleFrameIndex = 0;
           prevPoint = null;
+          capturedFramePromises = [];
+          pendingFrameFiles = [];
+          startRawVideoCapture();
           setStatus("RECORDING");
         }
       }
@@ -1090,6 +1285,8 @@
 
         while (now - lastSampleTime >= SAMPLE_INTERVAL) {
           const ts = Number((sampleFrameIndex * SAMPLE_INTERVAL).toFixed(4));
+
+          captureRawFrame(sampleFrameIndex, ts);
 
           if (currentPoint) {
             const sx2 = CAM_W / displayCanvas.width;
@@ -1135,6 +1332,8 @@
     }
 
     function stopCurrentCamera() {
+      stopRawVideoCapture();
+
       if (!currentStream) return;
 
       currentStream.getTracks().forEach((track) => track.stop());
